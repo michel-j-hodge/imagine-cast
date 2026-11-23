@@ -25,7 +25,8 @@
   #relay { position: fixed; top: calc(70px + env(safe-area-inset-top)); right: 14px; font: 12px/1.45 ui-monospace, Menlo, monospace;
     background: rgba(0,0,0,.6); padding: 6px 9px; border-radius: 6px; text-align: left; }
   #relayText { margin: 0; white-space: pre; font: inherit; }
-  #copyCsv { margin-top: 6px; padding: 5px 10px; font: 12px ui-monospace, Menlo, monospace; color: #fff;
+  #pingText { margin: 4px 0 0; white-space: pre; font: inherit; }
+  #copyCsv, #ping { margin-top: 6px; padding: 5px 10px; font: 12px ui-monospace, Menlo, monospace; color: #fff;
     background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.35); border-radius: 5px; }
   #start { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 16px; background: radial-gradient(circle at 50% 42%, #2a1206 0%, #000 65%); text-align: center; padding: 28px; }
@@ -44,7 +45,7 @@
 <div id="guide"><div id="hint"></div><div id="legend"></div></div>
 <div id="debug"></div>
 <button id="flip" aria-label="Switch camera">&#8635;</button>
-<div id="relay"><pre id="relayText"></pre><button id="copyCsv">Copy CSV</button></div>
+<div id="relay"><pre id="relayText"></pre><button id="copyCsv">Copy CSV</button> <button id="ping">Ping</button><pre id="pingText"></pre></div>
 
 <div id="start">
   <h1>Imagine Cast</h1>
@@ -546,6 +547,40 @@ $("copyCsv").addEventListener("click", async () => {
   }
   btn.textContent = `Copied ${rows.length} rows`;
   setTimeout(() => { btn.textContent = "Copy CSV"; }, 1500);
+});
+
+// Ping diagnostic: plain GETs with no custom headers are "simple" CORS requests, so no preflight.
+// Compare the median with the PUT write time to see how much the preflight costs.
+// cache: "no-store" is a fetch option, not a header, so it does not trigger a preflight.
+const PING_URL = `${DB_URL}/.json?shallow=true`;
+const PING_COUNT = 5, PING_INTERVAL_MS = 1000;
+let pinging = false;
+$("ping").addEventListener("click", async () => {
+  if (pinging) return;
+  pinging = true;
+  const btn = $("ping"), out = $("pingText"), times = [];
+  btn.disabled = true;
+  const start = performance.now();
+  let failed = 0;
+  for (let i = 0; i < PING_COUNT; i++) {
+    const wait = start + i * PING_INTERVAL_MS - performance.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    const t0 = performance.now();
+    try {
+      const res = await fetch(PING_URL, { cache: "no-store" });
+      const ms = Math.round(performance.now() - t0);
+      await res.text();
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      times.push(ms);
+    } catch (e) { failed++; }
+    out.textContent = `ping    ${i + 1}/${PING_COUNT}` + (times.length ? ` · last ${times[times.length - 1]} ms` : "");
+  }
+  const s = times.slice().sort((a, b) => a - b), n = s.length;
+  const med = n ? (n % 2 ? s[(n - 1) / 2] : Math.round((s[n / 2 - 1] + s[n / 2]) / 2)) : null;
+  out.textContent = n ? `ping    median ${med} ms · ${s.join(" ")}` : "ping    failed";
+  if (failed && n) out.textContent += ` · ${failed} failed`;
+  btn.disabled = false;
+  pinging = false;
 });
 renderRelay();
 

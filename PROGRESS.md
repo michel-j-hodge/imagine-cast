@@ -57,3 +57,6 @@ Phase 0. Task 3 built; at STOP POINT 3 waiting for Michel to install on the watc
 - `res/raw/arm.wav` (0.18 s two-tone chime) and `fireball.wav` (0.5 s noise whoosh) are generated placeholders.
 - `./gradlew assembleDebug` passes (run with Android Studio's bundled JBR as `JAVA_HOME`). Not installed: the watch wasn't listed in `adb devices` during the session.
 - `watch/local.properties` (SDK path) exists locally and is gitignored. Android Studio will rewrite it on first open.
+
+### 2026-11-23 — Ping diagnostic (Michel's request, before Task 4)
+- Added a "Ping" button to the page's relay panel. It sends 5 GETs to `{DB_URL}/.json?shallow=true`, started 1 s apart, with no custom headers (a simple CORS request, so no preflight), using `cache: "no-store"` (a fetch option, not a header). It shows the median and each time. Each request is timed from `fetch` start until the response resolves, the same way as the PUT write leg, so the two numbers compare directly and show roughly what the preflight costs. Nothing else changed. Checked from the laptop: the URL returns 200 with an `access-control-allow-origin` header for the Pages origin.
