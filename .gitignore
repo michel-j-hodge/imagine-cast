@@ -1,0 +1,7 @@
+# Android Studio / Gradle (watch app)
+/watch/.gradle
+/watch/build
+/watch/app/build
+local.properties
+.idea
+*.iml

@@ -1,0 +1,763 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#000000">
+<title>Palm Flame</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; overscroll-behavior: none;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #fff;
+    -webkit-user-select: none; user-select: none; touch-action: none; }
+  #cam, #fx { position: fixed; inset: 0; width: 100%; height: 100%; }
+  #cam { object-fit: cover; background: #000; }
+  #cam.mirror { transform: scaleX(-1); }
+  #fx { pointer-events: none; }
+  #guide { position: fixed; left: 0; right: 0; bottom: calc(26px + env(safe-area-inset-bottom));
+    text-align: center; pointer-events: none; padding: 0 24px; text-shadow: 0 1px 6px rgba(0,0,0,.9); }
+  #hint { font-size: 17px; font-weight: 600; letter-spacing: .01em; min-height: 1.3em; }
+  #legend { margin-top: 8px; font-size: 14px; line-height: 1.5; color: #f1e6da; min-height: 1.5em; }
+  #flip { position: fixed; top: calc(14px + env(safe-area-inset-top)); right: 14px; width: 46px; height: 46px;
+    border-radius: 50%; border: 1px solid rgba(255,255,255,.35); background: rgba(0,0,0,.4); color: #fff;
+    font-size: 21px; line-height: 1; display: none; }
+  #debug { position: fixed; top: calc(14px + env(safe-area-inset-top)); left: 14px; font: 12px/1.45 ui-monospace, Menlo, monospace;
+    background: rgba(0,0,0,.55); padding: 6px 9px; border-radius: 6px; white-space: pre; display: none; pointer-events: none; }
+  #start { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 16px; background: radial-gradient(circle at 50% 42%, #2a1206 0%, #000 65%); text-align: center; padding: 28px; }
+  #start h1 { margin: 0; font-size: 30px; font-weight: 700; }
+  #start p { margin: 0; max-width: 310px; font-size: 15px; line-height: 1.5; color: #d9c9bd; }
+  #start ul { margin: 0; padding: 0; list-style: none; font-size: 15px; line-height: 1.8; color: #f1e6da; text-align: left; }
+  #go { margin-top: 8px; padding: 15px 34px; font-size: 17px; font-weight: 700; color: #1a0a00;
+    background: linear-gradient(#ffc44d, #ff7a18); border: 0; border-radius: 999px; }
+  #go:disabled { opacity: .55; }
+  #err { color: #ff9a8a; font-size: 14px; max-width: 310px; min-height: 1.4em; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<video id="cam" playsinline muted autoplay></video>
+<canvas id="fx"></canvas>
+<div id="guide"><div id="hint"></div><div id="legend"></div></div>
+<div id="debug"></div>
+<button id="flip" aria-label="Switch camera">&#8635;</button>
+
+<div id="start">
+  <h1>Palm Flame</h1>
+  <p>Cast in three steps: make a fist, show a sign, then open your hand. Close your fist to end the spell.</p>
+  <ul>
+    <li>&#9996;&#65039; Index and middle up: flame</li>
+    <li>&#129304; Index and pinky up: lightning</li>
+    <li>&#128076; Thumb and index pinched: spell circle</li>
+    <li>&#9757;&#65039; Index finger up: ball of light</li>
+  </ul>
+  <p>Ball of light: flick your hand up to toss it, then catch it with an open hand.</p>
+  <button id="go">Start camera</button>
+  <div id="err"></div>
+</div>
+
+<script type="module">
+import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
+
+const WASM_URL  = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm";
+const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+
+// ---- Tuning ---------------------------------------------------------------
+// Finger ratio = fingertip-to-wrist distance over knuckle-to-wrist distance.
+// Roughly 0.9 for a curled finger and 1.9 for a straight one.
+const FIST_BELOW   = 1.25;  // average ratio below this = fist
+const OPEN_ABOVE   = 1.60;  // average ratio above this = open hand
+const EXT          = 1.55;  // a finger counts as extended above this
+const EXT_PINKY    = 1.45;  // the pinky is shorter, so its bar is lower
+const CURL         = 1.40;  // a finger counts as curled below this
+const PINCH_BELOW  = 0.28;  // thumb-to-index gap, in palm lengths, that counts as a pinch
+const POSE_FRAMES  = 3;     // frames a pose must hold before it registers
+const CHARGE_WINDOW = 1500; // ms allowed between the fist and the sign
+const SIGN_WINDOW   = 2000; // ms allowed between the sign and the open hand
+const LOST_HOLD    = 500;   // ms a spell survives a tracking dropout
+const FLAME_HEIGHT = 1.7;   // flame height as a multiple of palm length
+const RENDER_SCALE = 1.5;   // canvas pixels per CSS pixel (capped by device)
+// Ball of light. Speeds are in metres per second, using the palm as a ruler.
+const PALM_M        = 0.095; // assumed real palm length in metres
+const GRAVITY_SCALE = 0.75;  // 1 = real gravity. Lower is floatier and easier to catch
+const TOSS_SPEED    = 0.9;   // upward hand speed (m/s) that starts a toss
+const TOSS_GAIN     = 1.0;   // multiplier on the hand's speed at release
+const RELEASE_DROP  = 0.75;  // the ball leaves when hand speed falls to this share of its peak
+const FLICK_MAX     = 450;   // ms before a long upward sweep releases anyway
+const HOLD_MIN      = 300;   // ms the ball must be held before it can be tossed
+const CATCH_RADIUS  = 0.8;   // catch distance from the palm, in palm lengths
+const CATCH_DELAY   = 150;   // ms after release before a catch can register
+const BALL_RADIUS   = 0.34;  // ball size in palm lengths
+const ORB_LIFT      = 0.15;  // how far above the palm centre the ball rests, in palm lengths
+const SPRING_K      = 600;   // stiffness of the held ball following the hand
+const SPRING_DAMP   = 30;    // damping of that follow
+const CAMERA_FOV    = 66;    // degrees across the long side of the video, for gyro compensation
+// ---------------------------------------------------------------------------
+
+const SPELLS = {
+  flame: { name: "Flame",        color: [1.0, 0.5, 0.15],  tips: [0, 1, 1, 0, 0] },
+  bolt:  { name: "Lightning",    color: [0.55, 0.75, 1.0], tips: [0, 1, 0, 0, 1] },
+  ring:  { name: "Spell circle", color: [0.3, 0.95, 0.85], tips: [1, 1, 0, 0, 0] },
+  orb:   { name: "Ball of light", color: [1.0, 0.9, 0.55], tips: [0, 1, 0, 0, 0] },
+};
+const SIGN_TO_SPELL = { two: "flame", horns: "bolt", pinch: "ring", one: "orb" };
+const LEGEND = "\u270C\uFE0F flame \u00B7 \uD83E\uDD18 lightning \u00B7 \uD83D\uDC4C circle \u00B7 \u261D\uFE0F ball";
+
+const $ = (id) => document.getElementById(id);
+const video = $("cam"), canvas = $("fx"), hint = $("hint"), legend = $("legend"), dbg = $("debug");
+const DEBUG = new URLSearchParams(location.search).has("debug");
+if (DEBUG) dbg.style.display = "block";
+
+// ---------- WebGL effects --------------------------------------------------
+const VERT = `
+attribute vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }`;
+
+const FRAG = `
+precision highp float;
+uniform vec2  uPos;       // palm centre, canvas pixels (origin bottom-left)
+uniform float uS;         // palm length, canvas pixels
+uniform float uTime;
+uniform float uFlame;     // flame intensity
+uniform float uFlameK;    // flame height in palm lengths
+uniform float uBolt;      // lightning intensity
+uniform float uRing;      // spell circle intensity
+uniform float uCharge;    // gathering sparks while the fist is held
+uniform vec3  uTilt;      // xy = palm normal on screen, z = foreshortening
+uniform vec2  uTips[5];   // fingertips, canvas pixels (thumb to pinky)
+uniform float uGlow[5];   // glow per fingertip
+uniform vec3  uGlowCol;
+uniform vec2  uBall;      // ball of light centre, canvas pixels
+uniform float uBallR;     // ball radius, canvas pixels
+uniform float uBallI;     // ball intensity
+uniform vec2  uBallVel;   // travel direction, length 0..1 by speed
+uniform float uSquash;    // 1 at the moment of a catch, decays to 0
+
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float noise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
+             mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+float fbm(vec2 p) {
+  float v = 0.0, a = 0.5;
+  for (int i = 0; i < 4; i++) { v += a * noise(p); p *= 2.03; a *= 0.5; }
+  return v;
+}
+
+// Jagged arc from a to b that re-rolls its shape several times a second.
+float bolt(vec2 p, vec2 a, vec2 b, float seed) {
+  vec2 ab = b - a;
+  float L = length(ab);
+  if (L < 0.06) return 0.0;
+  vec2 d = ab / L;
+  vec2 n = vec2(-d.y, d.x);
+  float along = dot(p - a, d);
+  float u = clamp(along / L, 0.0, 1.0);
+  float env = sin(u * 3.14159);
+  float tick = floor(uTime * 14.0) + seed;
+  float off = (fbm(vec2(u * 4.0 + tick * 1.7, tick)) - 0.5) * 0.55 * L * env
+            + (noise(vec2(u * 16.0 + tick * 3.1, seed)) - 0.5) * 0.14 * L * env;
+  float dist = abs(dot(p - a, n) - off);
+  float ends = smoothstep(-0.04, 0.0, along) * smoothstep(L + 0.04, L, along);
+  return 0.012 / (dist + 0.004) * smoothstep(0.5, 0.0, dist) * ends;
+}
+
+// Radius of a regular polygon's edge at angle a (corner radius 1).
+float poly(float a, float n) {
+  float s = 6.28318 / n;
+  float k = mod(a, s) - s * 0.5;
+  return cos(s * 0.5) / cos(k);
+}
+float line(float d, float w) {
+  float a = abs(d);
+  return smoothstep(w, 0.0, a) + 0.35 * exp(-a * 28.0);
+}
+
+void main() {
+  float glowSum = uGlow[0] + uGlow[1] + uGlow[2] + uGlow[3] + uGlow[4];
+  vec2 p = (gl_FragCoord.xy - uPos) / uS;
+  float t = uTime;
+  vec3 col = vec3(0.0);
+  float alpha = 0.0;
+
+  // ---- Ball of light (moves freely, so it is drawn before the palm cut-off) ----
+  if (uBallI > 0.003) {
+    vec2 q = (gl_FragCoord.xy - uBall) / uBallR;
+    q *= vec2(1.0 - 0.22 * uSquash, 1.0 + 0.35 * uSquash);
+    float sp = length(uBallVel);
+    if (sp > 0.01) {
+      vec2 d = uBallVel / sp;
+      float al = dot(q, d);
+      vec2 perp = q - al * d;
+      if (al < 0.0) { al /= (1.0 + 2.5 * sp); perp *= 1.0 + 0.5 * sp * min(-al, 1.5); }
+      q = al * d + perp;
+    }
+    float r = length(q);
+    if (r < 7.0) {
+      float swirl = fbm(q * 2.2 + vec2(t * 0.9, -t * 0.7));
+      float core = exp(-r * r * 3.0);
+      float halo = exp(-r * r * 0.32) * (0.85 + 0.15 * noise(vec2(t * 8.0, 2.2)));
+      vec3 c = vec3(1.0, 0.97, 0.9) * core * (1.0 + 0.6 * swirl)
+             + vec3(1.0, 0.8, 0.4) * halo * 0.38
+             + vec3(1.0, 0.9, 0.6) * smoothstep(0.14, 0.0, abs(r - 0.95)) * 0.4 * swirl;
+      for (int i = 0; i < 6; i++) {
+        float fi = float(i);
+        float s = hash(vec2(fi, 8.3));
+        float a = t * (1.2 + s) + fi * 1.05;
+        vec2 e = (1.35 + 0.4 * sin(t * 1.7 + fi)) * vec2(cos(a), sin(a) * 0.8);
+        float de = length(q - e);
+        c += vec3(1.0, 0.92, 0.7) * exp(-de * de * 90.0) * 0.7;
+      }
+      col += c * uBallI;
+      alpha = clamp(core * 0.6, 0.0, 1.0) * min(uBallI, 1.0);
+    }
+  }
+
+  if (uFlame + uBolt + uRing + uCharge + glowSum < 0.003 || dot(p, p) > 30.0) {
+    gl_FragColor = vec4(col, alpha);
+    return;
+  }
+
+  vec2 tp[5];
+  for (int i = 0; i < 5; i++) tp[i] = (uTips[i] - uPos) / uS;
+
+  // ---- Flame ----
+  if (uFlame > 0.003) {
+    vec2 pf = (p - vec2(0.0, 0.12)) / uFlameK;
+    float n  = fbm(vec2(pf.x * 3.0, pf.y * 2.2 - t * 1.8));
+    float n2 = fbm(vec2(pf.x * 6.0 + 7.3, pf.y * 4.0 - t * 3.0));
+    vec2 q = pf;
+    q.x += (n - 0.5) * 0.38 * max(q.y, 0.0);
+    float y = q.y / (1.0 + (n2 - 0.5) * 0.5);
+    float w = 0.32 * sqrt(max(1.0 - y, 0.0)) * smoothstep(-0.12, 0.15, y);
+    float d = abs(q.x) / max(w, 0.001);
+    float f = smoothstep(1.0, 0.15, d) * step(-0.12, y) * step(y, 1.0);
+    f *= mix(1.0, n * 1.7, smoothstep(0.25, 1.0, y));
+    f = clamp(f, 0.0, 1.0);
+
+    vec3 c = vec3(1.0, 0.33, 0.05) * f * 1.15
+           + vec3(1.0, 0.78, 0.28) * pow(f, 2.5)
+           + vec3(1.0, 0.97, 0.9)  * pow(f, 6.0) * 0.6;
+
+    float flick = 0.82 + 0.18 * noise(vec2(t * 9.0, 3.1));
+    float r = length((pf - vec2(0.0, 0.2)) * vec2(1.0, 0.85));
+    c += vec3(1.0, 0.45, 0.12) * exp(-r * r * 2.2) * 0.36 * flick;
+
+    for (int i = 0; i < 8; i++) {
+      float fi = float(i);
+      float s = hash(vec2(fi, 1.7));
+      float life = fract(t * (0.35 + 0.3 * s) + s * 7.0);
+      vec2 e = vec2((s - 0.5) * 0.5 + sin(t * 2.0 + fi * 2.4) * 0.12 * life, 0.3 + life * 1.5);
+      float de = length(pf - e);
+      c += vec3(1.0, 0.6, 0.2) * exp(-de * de * 1800.0) * (1.0 - life) * 1.2;
+    }
+    col += c * uFlame;
+    alpha = max(alpha, clamp(f * 0.55, 0.0, 1.0) * min(uFlame, 1.0));
+  }
+
+  // ---- Charge: sparks spiralling into the fist ----
+  if (uCharge > 0.003) {
+    vec3 c = vec3(1.0, 0.8, 0.5) * exp(-dot(p, p) * 3.0) * 0.2 * (0.7 + 0.3 * sin(t * 10.0));
+    for (int i = 0; i < 10; i++) {
+      float fi = float(i);
+      float s = hash(vec2(fi, 4.2));
+      float life = fract(t * (0.9 + 0.5 * s) + s * 5.0);
+      float rad = mix(1.7, 0.25, life * life);
+      float a = s * 6.28318 + life * 2.5 + fi;
+      float de = length(p - rad * vec2(cos(a), sin(a)));
+      c += vec3(1.0, 0.85, 0.6) * exp(-de * de * 700.0) * life * 1.3;
+    }
+    col += c * uCharge;
+  }
+
+  // ---- Fingertip glow ----
+  if (glowSum > 0.003) {
+    for (int i = 0; i < 5; i++) {
+      float d = length(p - tp[i]);
+      col += uGlowCol * uGlow[i] * (exp(-d * d * 40.0) * 0.8 + exp(-d * d * 600.0));
+    }
+  }
+
+  // ---- Lightning between neighbouring fingertips ----
+  if (uBolt > 0.003) {
+    float b = 0.0;
+    for (int i = 0; i < 4; i++) {
+      float fi = float(i);
+      float on = step(0.3, hash(vec2(floor(t * 8.0), fi * 3.7)));
+      b += bolt(p, tp[i], tp[i + 1], fi * 11.3) * on;
+    }
+    float flick = 0.7 + 0.3 * noise(vec2(t * 14.0, 9.3));
+    vec3 c = vec3(0.5, 0.7, 1.0) * b + vec3(1.0) * min(b * b * 0.15, 1.0);
+    c += vec3(0.35, 0.55, 1.0) * exp(-dot(p, p) * 1.6) * 0.28 * flick;
+    col += c * uBolt;
+  }
+
+  // ---- Spell circle, foreshortened to lie on the palm ----
+  if (uRing > 0.003) {
+    vec2 m = uTilt.xy;
+    float ml = length(m);
+    m = ml > 0.001 ? m / ml : vec2(1.0, 0.0);
+    vec2 q = vec2(dot(p, m) / uTilt.z, dot(p, vec2(-m.y, m.x)));
+    q /= (0.35 + 0.65 * min(uRing, 1.0));
+    float r = length(q);
+    if (r < 1.7) {
+      float ang = atan(q.y, q.x);
+      float g = line(r - 1.30, 0.012) + line(r - 1.18, 0.008) + line(r - 0.50, 0.008);
+      float dash = step(0.5, fract((ang + t * 0.5) * 24.0 / 6.28318));
+      g += smoothstep(0.035, 0.0, abs(r - 1.24)) * dash * 0.8;
+      g += line(r - 1.12 * poly(ang - t * 0.35, 4.0), 0.010);
+      g += line(r - 1.12 * poly(ang - t * 0.35 + 0.7854, 4.0), 0.010);
+      g += line(r - 0.86 * poly(ang + t * 0.6, 3.0), 0.010);
+      float flick = 0.85 + 0.15 * noise(vec2(t * 7.0, 5.5));
+      vec3 c = mix(vec3(0.25, 0.95, 0.85), vec3(0.6, 0.5, 1.0), 0.5 + 0.5 * sin(ang * 2.0 + t));
+      col += c * g * flick * min(uRing, 1.0);
+      col += vec3(0.2, 0.8, 0.8) * exp(-r * r * 1.2) * 0.12 * uRing;
+    }
+  }
+
+  gl_FragColor = vec4(col, alpha);
+}`;
+
+let gl = null, U = null, glError = "";
+const tipsBuf = new Float32Array(10), glowBuf = new Float32Array(5);
+try {
+  gl = canvas.getContext("webgl", { alpha: true, premultipliedAlpha: true, antialias: false });
+  if (!gl) throw new Error("WebGL is not available in this browser.");
+  const compile = (type, src) => {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  };
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(prog, "aPos");
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+  const loc = (n) => gl.getUniformLocation(prog, n);
+  U = { pos: loc("uPos"), s: loc("uS"), time: loc("uTime"), flame: loc("uFlame"), flameK: loc("uFlameK"),
+        bolt: loc("uBolt"), ring: loc("uRing"), charge: loc("uCharge"), tilt: loc("uTilt"),
+        tips: loc("uTips[0]"), glow: loc("uGlow[0]"), glowCol: loc("uGlowCol"),
+        ball: loc("uBall"), ballR: loc("uBallR"), ballI: loc("uBallI"), ballVel: loc("uBallVel"), squash: loc("uSquash") };
+  gl.clearColor(0, 0, 0, 0);
+} catch (e) {
+  glError = "Effects failed to load: " + (e && e.message ? e.message : e);
+  $("err").textContent = glError;
+}
+
+let pxScale = 1;
+function resize() {
+  pxScale = Math.min(window.devicePixelRatio || 1, RENDER_SCALE);
+  canvas.width  = Math.round(window.innerWidth  * pxScale);
+  canvas.height = Math.round(window.innerHeight * pxScale);
+  if (gl) gl.viewport(0, 0, canvas.width, canvas.height);
+}
+window.addEventListener("resize", resize);
+resize();
+
+// ---------- Smoothing (One Euro filter) ------------------------------------
+class OneEuro {
+  constructor(minCut = 1.5, beta = 0.02, dCut = 1.0) { this.minCut = minCut; this.beta = beta; this.dCut = dCut; this.t = null; }
+  reset() { this.t = null; }
+  filter(x, t) {
+    if (this.t === null) { this.t = t; this.x = x; this.dx = 0; return x; }
+    const dt = Math.max((t - this.t) / 1000, 1e-3); this.t = t;
+    const alpha = (cut) => { const r = 2 * Math.PI * cut * dt; return r / (r + 1); };
+    this.dx += alpha(this.dCut) * ((x - this.x) / dt - this.dx);
+    this.x  += alpha(this.minCut + this.beta * Math.abs(this.dx)) * (x - this.x);
+    return this.x;
+  }
+}
+const fx = new OneEuro(), fy = new OneEuro(), fs = new OneEuro(1.0, 0.005);
+
+// ---------- Hand maths -----------------------------------------------------
+const dist3 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+
+// Classify the hand into one pose from its 3D landmarks.
+function readPose(w) {
+  const wrist = w[0];
+  const ratio = (mcp, tip) => dist3(w[tip], wrist) / Math.max(dist3(w[mcp], wrist), 1e-4);
+  const ri = ratio(5, 8), rm = ratio(9, 12), rr = ratio(13, 16), rp = ratio(17, 20);
+  const avg = (ri + rm + rr + rp) / 4;
+  const pinch = dist3(w[4], w[8]) / Math.max(dist3(w[9], wrist), 1e-4);
+  let pose = "none";
+  if (ri > EXT && rm < CURL && rr < CURL && rp < CURL) pose = "one";
+  else if (avg < FIST_BELOW) pose = "fist";
+  else if (pinch < PINCH_BELOW && rm > EXT && rr > EXT) pose = "pinch";
+  else if (ri > EXT && rm > EXT && rr < CURL && rp < CURL) pose = "two";
+  else if (ri > EXT && rp > EXT_PINKY && rm < CURL && rr < CURL) pose = "horns";
+  else if (avg > OPEN_ABOVE && pinch > 0.45 && ri > EXT && rm > EXT && rr > 1.4 && rp > 1.3) pose = "open";
+  return { pose, ri, rm, rr, rp, pinch };
+}
+
+// Normalised video coordinates -> CSS pixels, accounting for object-fit: cover.
+let mirrored = false;
+function toScreen(lm) {
+  const W = window.innerWidth, H = window.innerHeight;
+  const vw = video.videoWidth || W, vh = video.videoHeight || H;
+  const s = Math.max(W / vw, H / vh);
+  let x = (W - vw * s) / 2 + lm.x * vw * s;
+  const y = (H - vh * s) / 2 + lm.y * vh * s;
+  if (mirrored) x = W - x;
+  return { x, y };
+}
+
+// ---------- State ----------------------------------------------------------
+let state = "idle";            // idle -> charging (fist) -> signed (sign shown) -> active (spell cast)
+let spell = "flame";
+let cand = "none", candCount = 0, stable = "none";
+let chargeAt = 0, signAt = 0, castAt = 0, lastSeen = 0;
+let handVisible = false, flare = 0;
+let iFlame = 0, iBolt = 0, iRing = 0, iCharge = 0;
+const glow = [0, 0, 0, 0, 0];
+let pos = { x: 0, y: 0 }, size = 100;
+const tips = [0, 1, 2, 3, 4].map(() => ({ x: 0, y: 0 }));
+const tilt = { x: 0, y: 0, z: 1 };
+let lastRead = null;
+let iBall = 0, caughtAt = 0, missAt = -1e9;
+const rawPalm = { x: 0, y: 0 };
+
+// Camera rotation from the gyroscope, so a ball in flight stays put when the phone turns.
+// Screen position = stabilised position + camOff.
+const camOff = { x: 0, y: 0 };
+const gyro = { x: 0, y: 0, seen: false };
+const USE_GYRO = !new URLSearchParams(location.search).has("nogyro");
+window.addEventListener("devicemotion", (e) => {
+  const r = e.rotationRate;
+  if (!r || r.alpha == null) return;
+  gyro.x = r.alpha * Math.PI / 180;   // about the screen's left-right axis
+  gyro.y = r.beta * Math.PI / 180;    // about the screen's bottom-top axis
+  gyro.seen = true;
+});
+
+// <orb-core> Ball physics. Coordinates are pixels with y pointing down.
+const orb = {
+  mode: "held", x: 0, y: 0, vx: 0, vy: 0, px: 0, py: 0, g: 0, r: 30,
+  hist: [], flick: null, since: 0, relAt: 0, squash: 0, speed: 0,
+  reset(x, y, now) {
+    this.mode = "held"; this.x = x; this.y = y; this.vx = 0; this.vy = 0;
+    this.hist = []; this.flick = null; this.since = now; this.squash = 0;
+  },
+  // Hand velocity in px/s over the last couple of tracked frames.
+  handVel() {
+    const h = this.hist, n = h.length;
+    if (n < 2) return null;
+    const last = h[n - 1];
+    let first = h[n - 2];
+    for (let i = n - 2; i >= 0 && last.t - h[i].t <= 75; i--) first = h[i];
+    const dt = (last.t - first.t) / 1000;
+    if (dt < 0.02) return null;
+    return { x: (last.x - first.x) / dt, y: (last.y - first.y) / dt };
+  },
+  // Feed one tracked palm position. Returns true on the frame the ball is released.
+  track(hx, hy, size, now) {
+    this.hist.push({ t: now, x: hx, y: hy });
+    while (this.hist.length && now - this.hist[0].t > 250) this.hist.shift();
+    const v = this.handVel();
+    this.speed = v ? Math.hypot(v.x, v.y) * PALM_M / size : 0;
+    if (this.mode !== "held" || now - this.since < HOLD_MIN || !v) return false;
+    const up = -v.y;
+    if (!this.flick) {
+      if (up > TOSS_SPEED * size / PALM_M) this.flick = { up, vx: v.x, vy: v.y, t: now };
+    } else if (up > this.flick.up) {
+      this.flick.up = up; this.flick.vx = v.x; this.flick.vy = v.y;
+    } else if (up < this.flick.up * RELEASE_DROP || now - this.flick.t > FLICK_MAX) {
+      this.release(size, now);
+      return true;
+    }
+    return false;
+  },
+  release(size, now) {
+    const f = this.flick;
+    this.mode = "flying";
+    this.vx = f.vx * TOSS_GAIN; this.vy = f.vy * TOSS_GAIN;
+    this.g = 9.81 * GRAVITY_SCALE * size / PALM_M;
+    this.relAt = now; this.flick = null;
+  },
+  // Advance one render frame. (ax, ay) is the point on the hand the ball rests at.
+  step(dt, ax, ay, size, handOk, canCatch, now) {
+    this.squash *= Math.exp(-dt * 9);
+    if (this.mode === "held") {
+      this.r = size * BALL_RADIUS;
+      this.vx += (SPRING_K * (ax - this.x) - SPRING_DAMP * this.vx) * dt;
+      this.vy += (SPRING_K * (ay - this.y) - SPRING_DAMP * this.vy) * dt;
+      this.x += this.vx * dt; this.y += this.vy * dt;
+      return null;
+    }
+    this.px = this.x; this.py = this.y;
+    this.vy += this.g * dt;
+    this.x += this.vx * dt; this.y += this.vy * dt;
+    if (handOk && canCatch && now - this.relAt > CATCH_DELAY) {
+      // Distance from the hand to the path the ball covered this frame.
+      const sx = this.x - this.px, sy = this.y - this.py;
+      const len2 = sx * sx + sy * sy;
+      const u = len2 > 0 ? Math.min(Math.max(((ax - this.px) * sx + (ay - this.py) * sy) / len2, 0), 1) : 0;
+      const d = Math.hypot(ax - (this.px + sx * u), ay - (this.py + sy * u));
+      if (d < CATCH_RADIUS * size) {
+        this.mode = "held"; this.since = now; this.squash = 1;
+        this.hist = []; this.flick = null;
+        this.vx *= 0.2; this.vy *= 0.3;   // keep a little momentum so it sinks into the hand
+        return "caught";
+      }
+    }
+    return null;
+  },
+};
+// </orb-core>
+
+const buzz = (ms) => { if (navigator.vibrate) navigator.vibrate(ms); };
+
+function updateState(now) {
+  const sign = SIGN_TO_SPELL[stable];
+  if (state === "idle") {
+    if (stable === "fist") { state = "charging"; chargeAt = now; }
+  } else if (state === "charging") {
+    if (sign) { state = "signed"; spell = sign; signAt = now; buzz(15); }
+    else if (stable === "fist") chargeAt = now;
+    else if (now - chargeAt > CHARGE_WINDOW) state = "idle";
+  } else if (state === "signed") {
+    if (sign) { if (sign !== spell) { spell = sign; buzz(15); } signAt = now; }
+    else if (stable === "open") {
+      state = "active"; castAt = now; flare = 1; buzz(35);
+      if (spell === "orb") orb.reset(pos.x - camOff.x, pos.y - ORB_LIFT * size - camOff.y, now);
+    }
+    else if (stable === "fist") { state = "charging"; chargeAt = now; }
+    else if (now - signAt > SIGN_WINDOW) state = "idle";
+  } else if (state === "active") {
+    const inFlight = spell === "orb" && orb.mode === "flying";
+    if (stable === "fist" && !inFlight) { state = "charging"; chargeAt = now; }
+  }
+}
+
+function setGuide(now) {
+  let text = "", sub = "";
+  if (state === "idle" && now - missAt < 2000) text = "Missed. Make a fist to cast again";
+  else if (!handVisible && state !== "active") text = "Show your hand to the camera";
+  else if (state === "idle") text = "Make a fist";
+  else if (state === "charging") { text = "Now make a sign"; sub = LEGEND; }
+  else if (state === "signed") text = SPELLS[spell].name + " ready. Open your hand";
+  else if (state === "active" && spell === "orb") {
+    if (orb.mode === "held" && now - caughtAt < 1200) text = "Caught";
+    else if (orb.mode === "held" && now - castAt < 6000) text = "Flick your hand up to toss it";
+  }
+  else if (state === "active" && now - castAt < 3500) text = "Close your fist to end it";
+  if (hint.textContent !== text) hint.textContent = text;
+  if (legend.textContent !== sub) legend.textContent = sub;
+}
+
+// ---------- Main loop ------------------------------------------------------
+let landmarker = null, lastVideoTime = -1, lastFrame = performance.now();
+let fps = 0, detectCount = 0, fpsStamp = performance.now();
+const ease = (cur, target, dt, rate) => cur + (target - cur) * (1 - Math.exp(-dt * rate));
+
+function frame() {
+  const now = performance.now();
+  const dt = Math.min((now - lastFrame) / 1000, 0.1);
+  lastFrame = now;
+
+  if (landmarker && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    const res = landmarker.detectForVideo(video, now);
+    detectCount++;
+    if (res.landmarks && res.landmarks.length) {
+      const lm = res.landmarks[0];
+      const world = (res.worldLandmarks && res.worldLandmarks[0]) || lm;
+      const fresh = !handVisible;
+      if (fresh) { fx.reset(); fy.reset(); fs.reset(); orb.hist = []; }
+      handVisible = true; lastSeen = now;
+
+      // Palm centre: wrist plus the four finger knuckles.
+      let cx = 0, cy = 0;
+      for (const i of [0, 5, 9, 13, 17]) { const p = toScreen(lm[i]); cx += p.x; cy += p.y; }
+      cx /= 5; cy /= 5;
+      const wrist = toScreen(lm[0]), mid = toScreen(lm[9]), idx = toScreen(lm[5]), pinky = toScreen(lm[17]);
+      const palm = Math.max(Math.hypot(mid.x - wrist.x, mid.y - wrist.y),
+                            Math.hypot(idx.x - pinky.x, idx.y - pinky.y) * 1.3);
+      pos.x = fx.filter(cx, now);
+      pos.y = fy.filter(cy, now);
+      size  = fs.filter(palm, now);
+      rawPalm.x = cx; rawPalm.y = cy;
+      const orbLive = state === "active" && spell === "orb";
+      if (orb.track(cx - camOff.x, cy - camOff.y, size, now) && !orbLive) orb.mode = "held";
+
+      // Fingertips, lightly smoothed.
+      [4, 8, 12, 16, 20].forEach((id, i) => {
+        const p = toScreen(lm[id]);
+        const k = fresh ? 1 : 0.6;
+        tips[i].x += (p.x - tips[i].x) * k;
+        tips[i].y += (p.y - tips[i].y) * k;
+      });
+
+      // Palm normal, used to lay the spell circle flat on the palm.
+      const a = { x: world[5].x - world[0].x, y: world[5].y - world[0].y, z: world[5].z - world[0].z };
+      const b = { x: world[17].x - world[0].x, y: world[17].y - world[0].y, z: world[17].z - world[0].z };
+      let nx = a.y * b.z - a.z * b.y, ny = a.z * b.x - a.x * b.z, nz = a.x * b.y - a.y * b.x;
+      const nl = Math.hypot(nx, ny, nz) || 1;
+      nx /= nl; ny /= nl; nz /= nl;
+      const k = fresh ? 1 : 0.3;
+      tilt.x += ((mirrored ? -nx : nx) - tilt.x) * k;
+      tilt.y += (-ny - tilt.y) * k;
+      tilt.z += (Math.min(Math.max(Math.abs(nz), 0.35), 1) - tilt.z) * k;
+
+      // Pose, held for a few frames before it counts.
+      lastRead = readPose(world);
+      if (lastRead.pose === cand) candCount++; else { cand = lastRead.pose; candCount = 1; }
+      if (candCount >= POSE_FRAMES) stable = cand;
+      updateState(now);
+    } else {
+      // Tracking often drops mid-flick. If a toss was under way, let the ball go.
+      if (handVisible && state === "active" && spell === "orb" && orb.mode === "held" && orb.flick) orb.release(size, now);
+      handVisible = false; cand = "none"; candCount = 0; stable = "none";
+    }
+  }
+
+  // Follow camera rotation (rear camera only).
+  if (USE_GYRO && gyro.seen && !mirrored) {
+    const W = window.innerWidth, H = window.innerHeight;
+    const vw = video.videoWidth || W, vh = video.videoHeight || H;
+    const focal = Math.max(vw, vh) / 2 / Math.tan(CAMERA_FOV * Math.PI / 360) * Math.max(W / vw, H / vh);
+    if (Math.abs(gyro.y) > 0.01) camOff.x += focal * gyro.y * dt;
+    if (Math.abs(gyro.x) > 0.01) camOff.y += focal * gyro.x * dt;
+  }
+
+  // Ball of light: follow the hand while held, fly and look for a catch once tossed.
+  if (state === "active" && spell === "orb") {
+    const flying = orb.mode === "flying";
+    const ax = (flying ? rawPalm.x : pos.x) - camOff.x;
+    const ay = (flying ? rawPalm.y : pos.y) - ORB_LIFT * size - camOff.y;
+    const handOk = handVisible && now - lastSeen < 120;
+    const ev = orb.step(dt, ax, ay, size, handOk, !lastRead || lastRead.pose !== "fist", now);
+    if (ev === "caught") { caughtAt = now; buzz(25); }
+    const sx = orb.x + camOff.x, sy = orb.y + camOff.y;
+    if (orb.mode === "flying" && (sy > window.innerHeight + orb.r * 3 || sx < -window.innerWidth || sx > 2 * window.innerWidth)) {
+      state = "idle"; missAt = now;
+    }
+  }
+
+  // Hand gone for too long: end whatever was happening, unless the ball is in the air.
+  const ballInAir = state === "active" && spell === "orb" && orb.mode === "flying";
+  if (!handVisible && now - lastSeen > LOST_HOLD && state !== "idle" && !ballInAir) state = "idle";
+
+  // Ease every effect toward its target.
+  const active = state === "active";
+  iFlame  = ease(iFlame,  active && spell === "flame" ? 1 : 0, dt, active ? 7 : 11);
+  iBolt   = ease(iBolt,   active && spell === "bolt"  ? 1 : 0, dt, 10);
+  iRing   = ease(iRing,   active && spell === "ring"  ? 1 : 0, dt, active ? 5 : 10);
+  iBall   = ease(iBall,   active && spell === "orb"   ? 1 : 0, dt, active ? 8 : 6);
+  iCharge = ease(iCharge, state === "charging" ? 1 : state === "signed" ? 0.35 : 0, dt, 8);
+  for (let i = 0; i < 5; i++) {
+    const target = state === "signed" ? SPELLS[spell].tips[i] : (active && spell === "bolt" ? 0.7 : 0);
+    glow[i] = ease(glow[i], target, dt, 10);
+  }
+  flare *= Math.exp(-dt * 5);
+
+  if (gl) {
+    const H = canvas.height;
+    for (let i = 0; i < 5; i++) {
+      tipsBuf[i * 2] = tips[i].x * pxScale;
+      tipsBuf[i * 2 + 1] = H - tips[i].y * pxScale;
+      glowBuf[i] = glow[i];
+    }
+    const c = SPELLS[spell].color;
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.uniform2f(U.pos, pos.x * pxScale, H - pos.y * pxScale);
+    gl.uniform1f(U.s, Math.max(size * pxScale, 1));
+    gl.uniform1f(U.time, (now / 1000) % 1000);
+    gl.uniform1f(U.flame, Math.min(iFlame * (1 + 0.4 * flare), 1.4));
+    gl.uniform1f(U.flameK, FLAME_HEIGHT * (0.25 + 0.75 * iFlame) * (1 + 0.55 * flare));
+    gl.uniform1f(U.bolt, iBolt * (1 + 0.8 * flare));
+    gl.uniform1f(U.ring, iRing * (1 + 0.5 * flare));
+    gl.uniform1f(U.charge, iCharge);
+    gl.uniform3f(U.tilt, tilt.x, tilt.y, tilt.z);
+    gl.uniform2fv(U.tips, tipsBuf);
+    gl.uniform1fv(U.glow, glowBuf);
+    gl.uniform3f(U.glowCol, c[0], c[1], c[2]);
+    const flying = orb.mode === "flying";
+    const bs = Math.hypot(orb.vx, orb.vy);
+    const bk = flying && bs > 1 ? Math.min(bs / (orb.r * 14), 1) / bs : 0;
+    gl.uniform2f(U.ball, (orb.x + camOff.x) * pxScale, H - (orb.y + camOff.y) * pxScale);
+    gl.uniform1f(U.ballR, Math.max(orb.r * pxScale, 1));
+    gl.uniform1f(U.ballI, iBall * (1 + 0.5 * flare));
+    gl.uniform2f(U.ballVel, orb.vx * bk, -orb.vy * bk);
+    gl.uniform1f(U.squash, orb.squash);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  setGuide(now);
+  if (DEBUG) {
+    if (now - fpsStamp > 1000) { fps = detectCount; detectCount = 0; fpsStamp = now; }
+    const r = lastRead;
+    dbg.textContent = `state  ${state}\nspell  ${spell}\npose   ${stable} (raw ${cand})\n`
+      + (r ? `i ${r.ri.toFixed(2)}  m ${r.rm.toFixed(2)}\nr ${r.rr.toFixed(2)}  p ${r.rp.toFixed(2)}\npinch  ${r.pinch.toFixed(2)}\n` : "")
+      + `ball   ${orb.mode}  hand ${orb.speed.toFixed(2)} m/s\ngyro   ${!USE_GYRO ? "off" : gyro.seen ? gyro.x.toFixed(2) + " " + gyro.y.toFixed(2) : "no data"}\n`
+      + `hand   ${handVisible ? "yes" : "no"}\ntrack  ${fps} fps\nvideo  ${video.videoWidth}x${video.videoHeight}`;
+  }
+  requestAnimationFrame(frame);
+}
+
+// ---------- Camera and startup ---------------------------------------------
+let facing = "environment", stream = null;
+
+async function startCamera() {
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  stream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 } },
+  });
+  mirrored = facing === "user";
+  video.classList.toggle("mirror", mirrored);
+  video.srcObject = stream;
+  await video.play();
+  lastVideoTime = -1;
+}
+
+async function loadTracker() {
+  const vision = await FilesetResolver.forVisionTasks(WASM_URL);
+  const make = (delegate) => HandLandmarker.createFromOptions(vision, {
+    baseOptions: { modelAssetPath: MODEL_URL, delegate },
+    runningMode: "VIDEO",
+    numHands: 1,
+  });
+  try { return await make("GPU"); } catch (e) { return await make("CPU"); }
+}
+
+$("go").addEventListener("click", async () => {
+  const go = $("go"), err = $("err");
+  err.textContent = glError;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    err.textContent = "Camera not available. Open this page over https in Chrome.";
+    return;
+  }
+  go.disabled = true; go.textContent = "Starting…";
+  try {
+    if (typeof DeviceMotionEvent !== "undefined" && DeviceMotionEvent.requestPermission) await DeviceMotionEvent.requestPermission();
+  } catch (e) {}
+  try {
+    await startCamera();
+    go.textContent = "Loading hand tracker…";
+    landmarker = await loadTracker();
+    $("start").style.display = "none";
+    $("flip").style.display = "block";
+    try { if (navigator.wakeLock) await navigator.wakeLock.request("screen"); } catch (e) {}
+    requestAnimationFrame(frame);
+  } catch (e) {
+    go.disabled = false; go.textContent = "Start camera";
+    err.textContent = e && e.name === "NotAllowedError"
+      ? "Camera permission was denied. Allow it in the browser's site settings and try again."
+      : "Could not start: " + (e && e.message ? e.message : e);
+  }
+});
+
+$("flip").addEventListener("click", async () => {
+  facing = facing === "environment" ? "user" : "environment";
+  try { await startCamera(); } catch (e) { facing = facing === "environment" ? "user" : "environment"; }
+});
+</script>
+</body>
+</html>
