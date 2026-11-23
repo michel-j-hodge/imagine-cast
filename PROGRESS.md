@@ -1,7 +1,7 @@
 # PROGRESS
 
 ## Current phase
-Phase 0. Task 4 built and installed on the watch; at STOP POINT 4 waiting for Michel's hardware validation. Next: Task 5 (delay test, Michel, no code).
+Phase 0. STOP POINT 4 confirmed (all four checks pass). Status-line fix built, not yet installed on the watch (adb could not reach it). Next: Task 5 (delay test, Michel, no code). Do not start Task 6 before the Gate 0 call.
 
 ## Prerequisites (Michel)
 - [x] Firebase RTDB created (Singapore region, test mode). URL: `https://imagine-cast-default-rtdb.asia-southeast1.firebasedatabase.app`
@@ -13,7 +13,7 @@ Phase 0. Task 4 built and installed on the watch; at STOP POINT 4 waiting for Mi
 - [x] 1 Repo scaffold + Pages (verified on S23)
 - [x] 2 Camera page: state machine + relay (verified on S23)
 - [x] 3 Watch scaffold (verified on watch)
-- [x] 4 Relay client, arming, acks (built; hardware validation pending)
+- [x] 4 Relay client, arming, acks (verified on hardware)
 - [ ] 5 Delay test → Gate 0
 - [ ] 6 Punch → fireball
 - [ ] 7 Range and lighting test
@@ -28,7 +28,6 @@ Phase 0. Task 4 built and installed on the watch; at STOP POINT 4 waiting for Mi
 - 2026-11-23: Gate 0 revised (architecture §8). Task 5 advances on median round trip ≤ 800 ms and max ≤ 1500 ms on at least one network. The real gate is Task 6 cast-then-punch: at least 16 of 20 first punches must fire, otherwise write up a local transport before building it.
 
 ## Open Questions
-- **GATE0_LOG CSV header:** the log's CSV blocks show `seq,power,writeMs,rttMs`, but the page's Copy CSV adds a fifth `note` column (marks the warm-up row and write errors). Pasting the page output as-is is fine; only the header line in the log differs. No change made.
 - **CORS preflight (to measure):** a browser PUT to Firebase always triggers an OPTIONS preflight. It can't be seen from the phone. To check it, open the page on a laptop with DevTools → Network, cast a few times, and record whether an OPTIONS request appears before each PUT, and how long it takes. Chrome caches preflights for a short time, so the first cast after a pause may be the slow one. No change made; recorded per architecture §4.
 
 ## Session log
@@ -73,3 +72,9 @@ Phase 0. Task 4 built and installed on the watch; at STOP POINT 4 waiting for Mi
 - `MainActivity`: `WatchEvent { ARM_FIRE, DISARM, FIREBALL }`. Live `fire` → ARMED + `feedback.armed()`, `none` → IDLE, non-live applies silently, unknown power is logged. `relayClient.start()` in `onResume`, `stop()` in `onPause`, `feedback.release()` in `onDestroy`. Status line: `relay <connecting|live|reconnecting in N s|off> · <network>`.
 - Off-device checks: `./gradlew assembleDebug testDebugUnitTest` passes. Paths and field names match the page (`state.json` {power, seq, sentAt}, `ack.json` {seq, rxAt}). A curl of the live stream shows the expected first `put` on `/`.
 - On-device smoke test (Claude, via adb): installed and launched. Logcat showed `first snapshot seq=1795446471623 power=none, not applied`. Then curl PUT `fire` (new seq), then `none`: `/ack` showed the matching seq both times, with `rxAt`. The database was left at `none`. Michel still needs to do the full validation list (red + buzz by feel, kill/reopen starts IDLE, fist→two end to end, phone Wi-Fi off/on reconnect).
+
+### 2026-11-23 — Post–STOP POINT 4 fixes (Michel's request)
+- Michel confirmed all four Task 4 checks.
+- Watch status line split into two short centred lines at the bottom of the screen: line 1 is the relay status (`connecting`, `live`, `retry 0.5s`…`retry 5s`, `off`), line 2 is the network (`BT proxy` / `Wi-Fi` / `LTE`). Both are single-line. The network line is last, so it is always visible. `RelayClient` status strings were shortened to fit ("reconnecting in N s" → "retry Ns"; a reconnect attempt now shows "connecting").
+- GATE0_LOG.md: both CSV headers are now `seq,power,writeMs,rttMs,note`, matching the page's Copy CSV. That closes the earlier Open Question.
+- `./gradlew assembleDebug testDebugUnitTest` passes. Not installed: the watch dropped out of `adb devices`, and `adb connect` to its advertised mDNS address (192.168.1.13:43127) was refused, probably because the watch was asleep or wireless debugging had switched off.

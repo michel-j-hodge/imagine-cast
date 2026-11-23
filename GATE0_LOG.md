@@ -9,7 +9,7 @@ Median round trip: ____ ms  Max: ____ ms  Median write: ____ ms  Recognised: __ 
 Feel (one line):
 
 ```csv
-seq,power,writeMs,rttMs
+seq,power,writeMs,rttMs,note
 ```
 
 ### Run B — watch over Wi-Fi (Bluetooth off)
@@ -17,7 +17,7 @@ Median round trip: ____ ms  Max: ____ ms  Median write: ____ ms  Recognised: __ 
 Feel (one line):
 
 ```csv
-seq,power,writeMs,rttMs
+seq,power,writeMs,rttMs,note
 ```
 
 ### Gate 0 decision

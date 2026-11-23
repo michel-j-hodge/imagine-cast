@@ -74,7 +74,7 @@ class RelayClient(
         if (!running) return
         val gen = ++generation
         awaitingSnapshot = true
-        onStatus(if (attempt == 0) "connecting" else "reconnecting")
+        onStatus("connecting")
         // OkHttp follows Firebase's 307 redirect by default. Do not turn redirects off.
         val request = Request.Builder().url(Config.STATE_URL).build()
         eventSource = streamFactory.newEventSource(request, object : EventSourceListener() {
@@ -177,7 +177,8 @@ class RelayClient(
         val delay = backoff[minOf(attempt, backoff.size - 1)]
         attempt++
         Log.i(TAG, "reconnect in $delay ms ($reason)")
-        onStatus("reconnecting in ${"%.1f".format(delay / 1000.0)} s")
+        // Kept short: it has to fit on one line of the round screen.
+        onStatus("retry " + if (delay % 1000 == 0L) "${delay / 1000}s" else "${"%.1f".format(delay / 1000.0)}s")
         main.postDelayed(reconnectRunnable, delay)
     }
 

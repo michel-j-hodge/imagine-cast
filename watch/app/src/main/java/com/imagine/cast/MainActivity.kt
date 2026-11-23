@@ -10,6 +10,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
@@ -44,7 +45,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var feedback: FeedbackManager
     private lateinit var relayClient: RelayClient
 
-    // Keeps the status line's network type current, e.g. when Bluetooth is turned off for the Wi-Fi run.
+    // Keeps the network line current, e.g. when Bluetooth is turned off for the Wi-Fi run.
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
             val type = describe(caps)
@@ -69,7 +70,7 @@ class MainActivity : ComponentActivity() {
         )
         setContent {
             MaterialTheme {
-                CastScreen(watchState, "relay $relayStatus · $networkType")
+                CastScreen(watchState, relayStatus, networkType)
             }
         }
     }
@@ -136,7 +137,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun CastScreen(state: WatchState, status: String) {
+fun CastScreen(state: WatchState, relayStatus: String, networkType: String) {
     val armed = state == WatchState.ARMED
     Box(
         modifier = Modifier
@@ -151,14 +152,27 @@ fun CastScreen(state: WatchState, status: String) {
             fontWeight = if (armed) FontWeight.Bold else FontWeight.Normal,
             textAlign = TextAlign.Center,
         )
-        Text(
-            text = status,
-            color = Color(0xFF9E9E9E),
-            fontSize = 11.sp,
-            textAlign = TextAlign.Center,
+        // Two short centred lines, so neither one runs off the round screen.
+        // The network line is last and single-line, so it is always visible (the delay test needs it).
+        Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 22.dp),
-        )
+                .padding(bottom = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            StatusLine(relayStatus)
+            StatusLine(networkType)
+        }
     }
+}
+
+@Composable
+private fun StatusLine(text: String) {
+    Text(
+        text = text,
+        color = Color(0xFF9E9E9E),
+        fontSize = 11.sp,
+        textAlign = TextAlign.Center,
+        maxLines = 1,
+    )
 }
