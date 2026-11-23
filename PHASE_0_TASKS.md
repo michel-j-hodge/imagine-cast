@@ -131,6 +131,7 @@ Use GATE0_LOG.md.
 - A punch while armed always fires.
 - A punch while idle never fires.
 - Waving the arm normally while armed does not fire. If it does, note it in Open Questions; do not change the threshold in this task.
+- **Cast-then-punch test:** 20 casts, each followed by a punch as fast as possible right after the two-finger sign. Log in GATE0_LOG.md how many first punches fired. The pass bar is in architecture section 8.
 
 **STOP POINT 6**
 

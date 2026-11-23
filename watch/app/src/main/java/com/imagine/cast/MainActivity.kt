@@ -4,6 +4,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.os.Bundle
+import android.util.Log
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -24,18 +25,24 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.wear.compose.material3.MaterialTheme
 import androidx.wear.compose.material3.Text
+import okhttp3.OkHttpClient
 
 /** What the player feels. The watch always starts in IDLE. */
 enum class WatchState { IDLE, ARMED }
+
+/** Watch-side events. ARM_FIRE and DISARM come from the relay; FIREBALL comes from the punch (Task 6). */
+enum class WatchEvent { ARM_FIRE, DISARM, FIREBALL }
 
 class MainActivity : ComponentActivity() {
 
     // Compose UI state, owned here.
     private var watchState by mutableStateOf(WatchState.IDLE)
-    private var relayStatus by mutableStateOf("relay off")
+    private var relayStatus by mutableStateOf("off")
     private var networkType by mutableStateOf("no network")
 
     private lateinit var connectivity: ConnectivityManager
+    private lateinit var feedback: FeedbackManager
+    private lateinit var relayClient: RelayClient
 
     // Keeps the status line's network type current, e.g. when Bluetooth is turned off for the Wi-Fi run.
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
@@ -52,10 +59,40 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         connectivity = getSystemService(ConnectivityManager::class.java)
+        // Dependencies are wired by hand.
+        feedback = FeedbackManager(applicationContext)
+        relayClient = RelayClient(
+            okHttp = OkHttpClient(),
+            parser = RelayParser(),
+            onState = ::onRelayState,
+            onStatus = { relayStatus = it },
+        )
         setContent {
             MaterialTheme {
-                CastScreen(watchState, "$relayStatus · $networkType")
+                CastScreen(watchState, "relay $relayStatus · $networkType")
             }
+        }
+    }
+
+    /** Called on the main thread by RelayClient, after the ack has been sent. */
+    private fun onRelayState(power: String, live: Boolean) {
+        when (power) {
+            "fire" -> onEvent(WatchEvent.ARM_FIRE, live)
+            "none" -> onEvent(WatchEvent.DISARM, live)
+            else -> Log.w(TAG, "unknown power \"$power\", ignored")
+        }
+    }
+
+    /** [live] is false for a state that was missed while disconnected: apply it silently. */
+    private fun onEvent(event: WatchEvent, live: Boolean) {
+        when (event) {
+            WatchEvent.ARM_FIRE -> {
+                // Arming while already ARMED buzzes again: that confirms the cast landed.
+                watchState = WatchState.ARMED
+                if (live) feedback.armed()
+            }
+            WatchEvent.DISARM -> watchState = WatchState.IDLE
+            WatchEvent.FIREBALL -> Unit // Task 6
         }
     }
 
@@ -65,12 +102,19 @@ class MainActivity : ComponentActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         networkType = currentNetworkType()
         connectivity.registerDefaultNetworkCallback(networkCallback)
+        relayClient.start()
     }
 
     override fun onPause() {
+        relayClient.stop()
         connectivity.unregisterNetworkCallback(networkCallback)
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         super.onPause()
+    }
+
+    override fun onDestroy() {
+        feedback.release()
+        super.onDestroy()
     }
 
     private fun currentNetworkType(): String {
@@ -84,6 +128,10 @@ class MainActivity : ComponentActivity() {
         caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
         caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "LTE"
         else -> "other"
+    }
+
+    private companion object {
+        const val TAG = "MainActivity"
     }
 }
 

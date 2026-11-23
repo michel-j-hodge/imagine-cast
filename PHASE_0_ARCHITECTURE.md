@@ -152,8 +152,8 @@ n=14    median 155 ms · max 290 ms
 | Step | Estimate |
 |---|---|
 | Hand detected + 3 frames held | 100–200 ms |
-| Page → Firebase (write) | 40–120 ms |
-| Firebase → watch (via phone over Bluetooth, or Wi-Fi) | 40–150 ms, unknown |
+| Page → Firebase (write) | measured 190–240 ms (ping 167 ms median) |
+| Firebase → watch (via phone over Bluetooth, or Wi-Fi) | probably 150–250 ms, still unmeasured |
 | Watch reacts | < 20 ms |
 
 The round trip on the page adds the ack leg back. It is a diagnostic, not the number the player feels. The player feels detection plus the one-way trip, and the gate judges that by feel. The round-trip number tells us which leg to fix if the feel test fails.
@@ -167,11 +167,30 @@ The round trip on the page adds the ack leg back. It is a diagnostic, not the nu
 - **Battery.** Screen on, an open stream and the accelerometer together. Fine for 15-minute sessions; check the drop after the playtest.
 - **Weak watch speaker.** Haptics and the red screen carry the feedback; sound is a bonus.
 
-## 8. Gate 0 (after Task 5)
+## 8. Gate 0 (revised 2026-11-23 after measuring)
 
-- **ADVANCE:**
-  - median round trip ≤ 300 ms and max ≤ 600 ms over 20 casts, and
-  - Michel judges arming as feeling immediate, and
+**Measured from the S23:**
+- Ping (GET, no preflight): median 167 ms (106–175 ms)
+- Write (PUT, with preflight): 190–240 ms
+- Warm-up write: 271 ms
+
+So the preflight adds only about 30–70 ms; the main cost is the network round trip to Singapore. Keep PUT. The earlier "median ≤ 300 ms" target is dropped because it would fail by design.
+
+**Expected:**
+- Sign → watch red (one way): about 450–650 ms
+- Round trip shown on the page: about 600–800 ms
+
+**What the gate decides:** whether a kid's natural sign-then-punch gets caught. A slow "red" is acceptable if it reads as charging up. A missed first punch is not acceptable.
+
+**Task 5 (arming only):**
+- **ADVANCE to Task 6:**
+  - median round trip ≤ 800 ms and max ≤ 1500 ms on at least one network, and
+  - Michel judges that arming feels like a charge-up, not like something broken, and
   - fist→two is recognised in at least 9 of 10 casts at 1–1.5 m.
-- **STAY & REWORK:** it feels laggy, but the CSV shows one leg is clearly the cause (for example, the Bluetooth proxy, or the preflight). Fix that leg and run again.
-- **KILL:** the round trip is above 600 ms on both networks, or recognition at play distance is unreliable even in good light.
+- **STAY & REWORK:** one network is clearly worse (compare Bluetooth proxy with Wi-Fi). Use the better one and run again.
+- **KILL, or switch to local transport:** the median round trip is above 1000 ms on both networks.
+
+**Task 6 adds the real gate:** cast-then-punch.
+- 20 casts. Each time, punch as fast as possible right after the two-finger sign. Count how many first punches fire.
+- **≥ 16 of 20:** the cloud relay is good enough. Proceed to Task 7.
+- **< 16 of 20:** the arming delay is costing first punches. The next step is a local transport (the watch hosts its own server on Wi-Fi), which removes the internet leg. Write the decision up in chat before building anything.

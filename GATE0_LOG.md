@@ -24,6 +24,10 @@ seq,power,writeMs,rttMs
 ADVANCE / STAY & REWORK / KILL:
 Reason:
 
+## Task 6 — Cast-then-punch
+Network: ______  First punches fired: __ / 20  Decision (≥16 continue / <16 local transport):
+Notes:
+
 ## Task 7 — Range and lighting
 
 | Distance | Normal light hits / 10 | Dim light hits / 10 | Notes |

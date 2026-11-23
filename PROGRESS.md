@@ -1,7 +1,7 @@
 # PROGRESS
 
 ## Current phase
-Phase 0. Task 3 built; at STOP POINT 3 waiting for Michel to install on the watch. STOP POINT 2 (camera page) is being verified on the phone in parallel. Next: Task 4 (relay client, arming, acks).
+Phase 0. Task 4 built and installed on the watch; at STOP POINT 4 waiting for Michel's hardware validation. Next: Task 5 (delay test, Michel, no code).
 
 ## Prerequisites (Michel)
 - [x] Firebase RTDB created (Singapore region, test mode). URL: `https://imagine-cast-default-rtdb.asia-southeast1.firebasedatabase.app`
@@ -11,9 +11,9 @@ Phase 0. Task 3 built; at STOP POINT 3 waiting for Michel to install on the watc
 
 ## Tasks
 - [x] 1 Repo scaffold + Pages (verified on S23)
-- [x] 2 Camera page: state machine + relay (built; phone validation pending)
-- [x] 3 Watch scaffold (built, `assembleDebug` passes; on-watch validation pending)
-- [ ] 4 Relay client, arming, acks
+- [x] 2 Camera page: state machine + relay (verified on S23)
+- [x] 3 Watch scaffold (verified on watch)
+- [x] 4 Relay client, arming, acks (built; hardware validation pending)
 - [ ] 5 Delay test → Gate 0
 - [ ] 6 Punch → fireball
 - [ ] 7 Range and lighting test
@@ -24,8 +24,11 @@ Phase 0. Task 3 built; at STOP POINT 3 waiting for Michel to install on the watc
 - 2026-11-23: Relay is Firebase RTDB over REST and SSE, Singapore region. No SDKs.
 - 2026-11-23: The watch stays armed until an open hand is held for 1 s. Every punch while armed fires.
 - 2026-11-23: Fireball feedback is on the watch only for Phase 0.
+- 2026-11-23: Keep PUT for page writes. Measured on the S23: ping (GET, no preflight) median 167 ms against write (PUT) 190–240 ms, so the preflight costs only about 30–70 ms. The relay contract is unchanged.
+- 2026-11-23: Gate 0 revised (architecture §8). Task 5 advances on median round trip ≤ 800 ms and max ≤ 1500 ms on at least one network. The real gate is Task 6 cast-then-punch: at least 16 of 20 first punches must fire, otherwise write up a local transport before building it.
 
 ## Open Questions
+- **GATE0_LOG CSV header:** the log's CSV blocks show `seq,power,writeMs,rttMs`, but the page's Copy CSV adds a fifth `note` column (marks the warm-up row and write errors). Pasting the page output as-is is fine; only the header line in the log differs. No change made.
 - **CORS preflight (to measure):** a browser PUT to Firebase always triggers an OPTIONS preflight. It can't be seen from the phone. To check it, open the page on a laptop with DevTools → Network, cast a few times, and record whether an OPTIONS request appears before each PUT, and how long it takes. Chrome caches preflights for a short time, so the first cast after a pause may be the slow one. No change made; recorded per architecture §4.
 
 ## Session log
@@ -60,3 +63,13 @@ Phase 0. Task 3 built; at STOP POINT 3 waiting for Michel to install on the watc
 
 ### 2026-11-23 — Ping diagnostic (Michel's request, before Task 4)
 - Added a "Ping" button to the page's relay panel. It sends 5 GETs to `{DB_URL}/.json?shallow=true`, started 1 s apart, with no custom headers (a simple CORS request, so no preflight), using `cache: "no-store"` (a fetch option, not a header). It shows the median and each time. Each request is timed from `fetch` start until the response resolves, the same way as the PUT write leg, so the two numbers compare directly and show roughly what the preflight costs. Nothing else changed. Checked from the laptop: the URL returns 200 with an `access-control-allow-origin` header for the Pages origin.
+
+### 2026-11-23 — Task 4
+- Michel confirmed STOP POINTS 2 and 3, and replaced PHASE_0_ARCHITECTURE.md, PHASE_0_TASKS.md and GATE0_LOG.md (revised §8 gate, cast-then-punch test in Task 6). Those files are committed as he wrote them.
+- `RelayParser` + `RelayEvent` (State / Empty / Cancel / Ignored; `parse` returns null for keep-alive). Pure Kotlin, never throws. 9 JUnit tests: the 6 from the task list plus none-state, missing power/seq, cancel/auth_revoked. All pass.
+- `RelayClient`: okhttp-sse stream on `/bands/band-01/state.json`. Events are parsed on OkHttp's thread, then posted to the main thread, where all client state lives. A generation counter drops events from a stream that's been replaced or stopped. Seq rules follow §3 exactly: the first snapshot after start sets `lastSeq` only (no state, no ack); later puts need `seq > lastSeq`, ack is enqueued first, then `onState(power, live=true)`; a reconnect snapshot with a newer seq is acked and applied with `live=false`. Backoff is 500/1000/2000/4000/5000 ms from `Config`, reset in `onOpen`. `cancel`/`auth_revoked`/failure/close all reconnect. Redirects are left on (OkHttp default). The stream uses a 45 s read timeout (`STREAM_READ_TIMEOUT_S`), because OkHttp's default 10 s would cut the stream between Firebase's ~30 s keep-alives. A silently dead connection is therefore noticed within 45 s at worst.
+- `lastSeq` lives in the `RelayClient` instance, one per `MainActivity`. A recreated Activity (which starts in IDLE) treats its first snapshot as "first after start". `onPause`→`onResume` is a reconnect, so a state missed while paused is applied silently.
+- `FeedbackManager`: SoundPool (USAGE_GAME) loads `arm.wav` and `fireball.wav` once. `armed()` = arm sound + 60 ms buzz. `fireball()` = fireball sound + 150 ms buzz at amplitude 255 (unused until Task 6). `release()`. VibratorManager on API 31+, with the old accessor kept as a fallback for minSdk 30.
+- `MainActivity`: `WatchEvent { ARM_FIRE, DISARM, FIREBALL }`. Live `fire` → ARMED + `feedback.armed()`, `none` → IDLE, non-live applies silently, unknown power is logged. `relayClient.start()` in `onResume`, `stop()` in `onPause`, `feedback.release()` in `onDestroy`. Status line: `relay <connecting|live|reconnecting in N s|off> · <network>`.
+- Off-device checks: `./gradlew assembleDebug testDebugUnitTest` passes. Paths and field names match the page (`state.json` {power, seq, sentAt}, `ack.json` {seq, rxAt}). A curl of the live stream shows the expected first `put` on `/`.
+- On-device smoke test (Claude, via adb): installed and launched. Logcat showed `first snapshot seq=1795446471623 power=none, not applied`. Then curl PUT `fire` (new seq), then `none`: `/ack` showed the matching seq both times, with `rxAt`. The database was left at `none`. Michel still needs to do the full validation list (red + buzz by feel, kill/reopen starts IDLE, fist→two end to end, phone Wi-Fi off/on reconnect).
