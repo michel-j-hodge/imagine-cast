@@ -41,7 +41,7 @@ class FeedbackManager(context: Context) {
         buzz(ARM_BUZZ_MS, VibrationEffect.DEFAULT_AMPLITUDE)
     }
 
-    /** FIREBALL (Task 6). */
+    /** FIREBALL: a punch while ARMED. */
     fun fireball() {
         soundPool.play(fireballSound, 1f, 1f, 1, 0, 1f)
         buzz(FIREBALL_BUZZ_MS, MAX_AMPLITUDE)

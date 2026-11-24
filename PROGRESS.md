@@ -1,7 +1,7 @@
 # PROGRESS
 
 ## Current phase
-Phase 0. STOP POINT 4 confirmed (all four checks pass). Status-line fix built, not yet installed on the watch (adb could not reach it). Next: Task 5 (delay test, Michel, no code). Do not start Task 6 before the Gate 0 call.
+Phase 0. STOP POINT 4 confirmed. Task 5 done, Gate 0: ADVANCE (play on Wi-Fi). Task 6 built and unit tested, **not yet installed on the watch** (not in `adb devices`). At STOP POINT 6: Michel installs/validates, then runs the 20-cast cast-then-punch test.
 
 ## Prerequisites (Michel)
 - [x] Firebase RTDB created (Singapore region, test mode). URL: `https://imagine-cast-default-rtdb.asia-southeast1.firebasedatabase.app`
@@ -14,8 +14,8 @@ Phase 0. STOP POINT 4 confirmed (all four checks pass). Status-line fix built, n
 - [x] 2 Camera page: state machine + relay (verified on S23)
 - [x] 3 Watch scaffold (verified on watch)
 - [x] 4 Relay client, arming, acks (verified on hardware)
-- [ ] 5 Delay test → Gate 0
-- [ ] 6 Punch → fireball
+- [x] 5 Delay test → Gate 0: ADVANCE
+- [ ] 6 Punch → fireball (built; awaiting STOP POINT 6 on hardware)
 - [ ] 7 Range and lighting test
 - [ ] 8 Kid test
 
@@ -25,6 +25,7 @@ Phase 0. STOP POINT 4 confirmed (all four checks pass). Status-line fix built, n
 - 2026-11-23: The watch stays armed until an open hand is held for 1 s. Every punch while armed fires.
 - 2026-11-23: Fireball feedback is on the watch only for Phase 0.
 - 2026-11-23: Keep PUT for page writes. Measured on the S23: ping (GET, no preflight) median 167 ms against write (PUT) 190–240 ms, so the preflight costs only about 30–70 ms. The relay contract is unchanged.
+- 2026-11-24: Gate 0 ADVANCE. Run A (BT proxy) fires median 621 ms, max 885 ms, 20/20 fired, "steady but slower, like the watch loading up". Run B (Wi-Fi) fires median 389 ms, max 526 ms, 19 casts (first not acked: watch still connecting), "instant". Task 6 and the kid test are played on Wi-Fi (Bluetooth off on the watch).
 - 2026-11-23: Gate 0 revised (architecture §8). Task 5 advances on median round trip ≤ 800 ms and max ≤ 1500 ms on at least one network. The real gate is Task 6 cast-then-punch: at least 16 of 20 first punches must fire, otherwise write up a local transport before building it.
 
 ## Open Questions
@@ -78,3 +79,12 @@ Phase 0. STOP POINT 4 confirmed (all four checks pass). Status-line fix built, n
 - Watch status line split into two short centred lines at the bottom of the screen: line 1 is the relay status (`connecting`, `live`, `retry 0.5s`…`retry 5s`, `off`), line 2 is the network (`BT proxy` / `Wi-Fi` / `LTE`). Both are single-line. The network line is last, so it is always visible. `RelayClient` status strings were shortened to fit ("reconnecting in N s" → "retry Ns"; a reconnect attempt now shows "connecting").
 - GATE0_LOG.md: both CSV headers are now `seq,power,writeMs,rttMs,note`, matching the page's Copy CSV. That closes the earlier Open Question.
 - `./gradlew assembleDebug testDebugUnitTest` passes. Not installed: the watch dropped out of `adb devices`, and `adb connect` to its advertised mDNS address (192.168.1.13:43127) was refused, probably because the watch was asleep or wireless debugging had switched off.
+
+### 2026-11-24 — Task 5 recorded, Task 6 built
+- Michel confirmed STOP POINT 4 (all four checks, including recovery after airplane mode) and ran Task 5. Results and the ADVANCE decision are in GATE0_LOG.md; the CSV blocks are left for Michel to paste. Setup line and median write are still blank there.
+- Both post–STOP POINT 4 fixes (two-line status, `note` CSV column) were already committed in `43cd800`.
+- `PunchDetector(threshold, cooldownMs, clock)`: `onSample(x, y, z, tMs)` returns true on a punch. Magnitude includes gravity (commented why). Fires when magnitude > 18 m/s² (strictly greater) and ≥ 500 ms since the last punch; the cooldown also swallows the rest of the same spike. `PUNCH_THRESHOLD` and `PUNCH_COOLDOWN_MS` are constants in its companion. Reading of the spec: `tMs` is the sample time and defaults to `clock()` (monotonic ms); MainActivity passes the sensor's own `event.timestamp / 1e6`, so `clock` is only a fallback.
+- 7 JUnit tests: the 4 from the task (below threshold, single spike, 300 ms → one, 600 ms → two) plus exactly-at-threshold, three-axis magnitude, and the clock fallback. All pass, with the 9 RelayParser tests.
+- `MainActivity` implements `SensorEventListener`: TYPE_ACCELEROMETER at SENSOR_DELAY_GAME, registered in `onResume`, unregistered in `onPause`. Every sample goes through the detector; a punch while ARMED → `FIREBALL` (`feedback.fireball()`: fireball.wav + 150 ms buzz at 255, and a 300 ms orange-white flash over the current screen). A punch while IDLE does nothing except a `Log.d("punch while IDLE, ignored")`. That log is there to read cast-then-punch misses: a missed first punch should show up as an IDLE punch just before the arm. Side effect: an IDLE punch starts the 500 ms cooldown too, so a punch within 500 ms of an IDLE punch is ignored even if the watch armed in between. It's rare, but if the cast-then-punch count is borderline it's worth looking at logcat.
+- The watch stays ARMED after a fireball (decision 2026-11-23: every punch while armed fires).
+- `./gradlew assembleDebug testDebugUnitTest` passes. Not installed: the watch is not in `adb devices` and not visible over mDNS.

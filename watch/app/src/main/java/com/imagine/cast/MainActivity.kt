@@ -1,5 +1,9 @@
 package com.imagine.cast
 
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -14,8 +18,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -26,24 +33,30 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.wear.compose.material3.MaterialTheme
 import androidx.wear.compose.material3.Text
+import kotlinx.coroutines.delay
 import okhttp3.OkHttpClient
 
 /** What the player feels. The watch always starts in IDLE. */
 enum class WatchState { IDLE, ARMED }
 
-/** Watch-side events. ARM_FIRE and DISARM come from the relay; FIREBALL comes from the punch (Task 6). */
+/** Watch-side events. ARM_FIRE and DISARM come from the relay; FIREBALL comes from a local punch. */
 enum class WatchEvent { ARM_FIRE, DISARM, FIREBALL }
 
-class MainActivity : ComponentActivity() {
+class MainActivity : ComponentActivity(), SensorEventListener {
 
     // Compose UI state, owned here.
     private var watchState by mutableStateOf(WatchState.IDLE)
     private var relayStatus by mutableStateOf("off")
     private var networkType by mutableStateOf("no network")
+    /** Bumped on every FIREBALL; each new value plays one flash. */
+    private var flashCount by mutableIntStateOf(0)
 
     private lateinit var connectivity: ConnectivityManager
     private lateinit var feedback: FeedbackManager
     private lateinit var relayClient: RelayClient
+    private lateinit var sensorManager: SensorManager
+    private var accelerometer: Sensor? = null
+    private val punchDetector = PunchDetector()
 
     // Keeps the network line current, e.g. when Bluetooth is turned off for the Wi-Fi run.
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
@@ -60,6 +73,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         connectivity = getSystemService(ConnectivityManager::class.java)
+        sensorManager = getSystemService(SensorManager::class.java)
+        accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        if (accelerometer == null) Log.e(TAG, "no accelerometer: punches cannot fire")
         // Dependencies are wired by hand.
         feedback = FeedbackManager(applicationContext)
         relayClient = RelayClient(
@@ -70,7 +86,7 @@ class MainActivity : ComponentActivity() {
         )
         setContent {
             MaterialTheme {
-                CastScreen(watchState, relayStatus, networkType)
+                CastScreen(watchState, relayStatus, networkType, flashCount)
             }
         }
     }
@@ -93,9 +109,30 @@ class MainActivity : ComponentActivity() {
                 if (live) feedback.armed()
             }
             WatchEvent.DISARM -> watchState = WatchState.IDLE
-            WatchEvent.FIREBALL -> Unit // Task 6
+            WatchEvent.FIREBALL -> {
+                // Punch detection and feedback are local to the watch: no network delay on firing.
+                feedback.fireball()
+                flashCount++
+            }
         }
     }
+
+    // Accelerometer callbacks arrive on the main thread (registered without a Handler).
+    override fun onSensorChanged(event: SensorEvent) {
+        // Raw TYPE_ACCELEROMETER values include gravity; PunchDetector's threshold is set with that in mind.
+        // event.timestamp is monotonic nanoseconds, so it is safe for the cooldown.
+        val (x, y, z) = event.values
+        val punch = punchDetector.onSample(x, y, z, event.timestamp / 1_000_000L)
+        if (!punch) return
+        if (watchState == WatchState.ARMED) {
+            onEvent(WatchEvent.FIREBALL, live = true)
+        } else {
+            // The sign unlocks the power: a punch in IDLE does nothing. Logged to help read cast-then-punch misses.
+            Log.d(TAG, "punch while IDLE, ignored")
+        }
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 
     override fun onResume() {
         super.onResume()
@@ -104,9 +141,11 @@ class MainActivity : ComponentActivity() {
         networkType = currentNetworkType()
         connectivity.registerDefaultNetworkCallback(networkCallback)
         relayClient.start()
+        accelerometer?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
     }
 
     override fun onPause() {
+        sensorManager.unregisterListener(this)
         relayClient.stop()
         connectivity.unregisterNetworkCallback(networkCallback)
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -137,8 +176,16 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun CastScreen(state: WatchState, relayStatus: String, networkType: String) {
+fun CastScreen(state: WatchState, relayStatus: String, networkType: String, flashCount: Int) {
     val armed = state == WatchState.ARMED
+    // FIREBALL: a short orange-white flash over whichever state is showing.
+    var flashing by remember { mutableStateOf(false) }
+    LaunchedEffect(flashCount) {
+        if (flashCount == 0) return@LaunchedEffect
+        flashing = true
+        delay(FLASH_MS)
+        flashing = false
+    }
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -163,8 +210,14 @@ fun CastScreen(state: WatchState, relayStatus: String, networkType: String) {
             StatusLine(relayStatus)
             StatusLine(networkType)
         }
+        if (flashing) {
+            Box(Modifier.fillMaxSize().background(Color(0xFFFFB74D)))
+        }
     }
 }
+
+/** How long the FIREBALL flash stays on screen. */
+private const val FLASH_MS = 300L
 
 @Composable
 private fun StatusLine(text: String) {
