@@ -29,6 +29,7 @@ Phase 0. STOP POINT 4 confirmed. Task 5 done, Gate 0: ADVANCE (play on Wi-Fi). T
 - 2026-11-23: Gate 0 revised (architecture §8). Task 5 advances on median round trip ≤ 800 ms and max ≤ 1500 ms on at least one network. The real gate is Task 6 cast-then-punch: at least 16 of 20 first punches must fire, otherwise write up a local transport before building it.
 
 ## Open Questions
+- **Punch false positives (STOP POINT 6, 2026-11-25):** Michel reports the 18 m/s² threshold (gravity included) is too sensitive while ARMED: pointing at a steady pace fires, bringing the hand down fires, and there are quite a few double punches (one punch → two fireballs, so something about 500 ms or more after the first spike also crosses 18). Cast-then-punch speed is solid. Threshold and cooldown NOT changed (task rule). There is no measured evidence yet: the app logs neither magnitudes nor ARMED punches. Proposed next step: log the peak magnitude of each spike (punches, double punches, pointing, hand-down) and pick a threshold/cooldown from that data.
 - **CORS preflight (to measure):** a browser PUT to Firebase always triggers an OPTIONS preflight. It can't be seen from the phone. To check it, open the page on a laptop with DevTools → Network, cast a few times, and record whether an OPTIONS request appears before each PUT, and how long it takes. Chrome caches preflights for a short time, so the first cast after a pause may be the slow one. No change made; recorded per architecture §4.
 
 ## Session log
