@@ -27,8 +27,8 @@ Reason: Both networks are inside the §8 bar (median ≤ 800 ms, max ≤ 1500 ms
 Decision: play Task 6 and the kid test on Wi-Fi (Bluetooth off on the watch).
 
 ## Task 6 — Cast-then-punch
-Network: ______  First punches fired: __ / 20  Decision (≥16 continue / <16 local transport):
-Notes:
+Network: Wi-Fi (per Gate 0 decision)  First punches fired: **20 / 20**  Decision (≥16 continue / <16 local transport): **CONTINUE**, the cloud relay is good enough.
+Notes: Throwing a punch right after the sign fires quickly; "that part is solid". Caveat: the detector is too sensitive at 18 m/s² (pointing at a steady pace and bringing the hand down fire; quite a few double punches), so some first-punch hits could have been helped by stray movement. Arming speed is not in question. Open Question in PROGRESS.md; threshold unchanged pending the spike-log capture.
 
 ## Task 7 — Range and lighting
 

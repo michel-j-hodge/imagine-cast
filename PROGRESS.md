@@ -15,7 +15,7 @@ Phase 0. STOP POINT 4 confirmed. Task 5 done, Gate 0: ADVANCE (play on Wi-Fi). T
 - [x] 3 Watch scaffold (verified on watch)
 - [x] 4 Relay client, arming, acks (verified on hardware)
 - [x] 5 Delay test → Gate 0: ADVANCE
-- [ ] 6 Punch → fireball (built; awaiting STOP POINT 6 on hardware)
+- [ ] 6 Punch → fireball: cast-then-punch 20/20 on Wi-Fi (gate passed). Open: false positives / double punches, spike-log capture pending
 - [ ] 7 Range and lighting test
 - [ ] 8 Kid test
 
