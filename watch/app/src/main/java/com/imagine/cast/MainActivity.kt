@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.wear.compose.material3.MaterialTheme
 import androidx.wear.compose.material3.Text
+import kotlin.math.sqrt
 import kotlinx.coroutines.delay
 import okhttp3.OkHttpClient
 
@@ -57,6 +58,13 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private lateinit var sensorManager: SensorManager
     private var accelerometer: Sensor? = null
     private val punchDetector = PunchDetector()
+
+    // Diagnostic only (Open Question: false positives). Tracks each spike above SPIKE_LOG_MIN and logs
+    // its peak at the end, so a threshold can be chosen from measured data. Does not affect firing.
+    private var spikeStartMs = -1L
+    private var spikePeak = 0f
+    private var spikeFired = false
+    private var lastFireballMs = -1L
 
     // Keeps the network line current, e.g. when Bluetooth is turned off for the Wi-Fi run.
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
@@ -122,14 +130,41 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         // Raw TYPE_ACCELEROMETER values include gravity; PunchDetector's threshold is set with that in mind.
         // event.timestamp is monotonic nanoseconds, so it is safe for the cooldown.
         val (x, y, z) = event.values
-        val punch = punchDetector.onSample(x, y, z, event.timestamp / 1_000_000L)
-        if (!punch) return
-        if (watchState == WatchState.ARMED) {
-            onEvent(WatchEvent.FIREBALL, live = true)
-        } else {
-            // The sign unlocks the power: a punch in IDLE does nothing. Logged to help read cast-then-punch misses.
-            Log.d(TAG, "punch while IDLE, ignored")
+        val tMs = event.timestamp / 1_000_000L
+        val punch = punchDetector.onSample(x, y, z, tMs)
+        if (punch) {
+            if (watchState == WatchState.ARMED) {
+                onEvent(WatchEvent.FIREBALL, live = true)
+                lastFireballMs = tMs
+            } else {
+                // The sign unlocks the power: a punch in IDLE does nothing. Logged to help read cast-then-punch misses.
+                Log.d(TAG, "punch while IDLE, ignored")
+            }
         }
+        logSpike(sqrt(x * x + y * y + z * z), tMs, punch)
+    }
+
+    /** Diagnostic: one "spike" log line per movement above SPIKE_LOG_MIN (magnitude includes gravity). */
+    private fun logSpike(magnitude: Float, tMs: Long, punch: Boolean) {
+        if (magnitude > SPIKE_LOG_MIN) {
+            if (spikeStartMs < 0) {
+                spikeStartMs = tMs
+                spikePeak = 0f
+                spikeFired = false
+            }
+            if (magnitude > spikePeak) spikePeak = magnitude
+            if (punch) spikeFired = true
+            return
+        }
+        if (spikeStartMs < 0) return
+        val sinceFireball = if (lastFireballMs < 0) "-" else "${spikeStartMs - lastFireballMs}"
+        Log.d(
+            TAG,
+            "spike peak=%.1f dur=%dms detected=%b state=%s sinceFireball=%sms".format(
+                spikePeak, tMs - spikeStartMs, spikeFired, watchState, sinceFireball,
+            ),
+        )
+        spikeStartMs = -1L
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
@@ -172,6 +207,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     private companion object {
         const val TAG = "MainActivity"
+        /** Diagnostic logging floor, m/s² including gravity. Below the punch threshold on purpose. */
+        const val SPIKE_LOG_MIN = 12f
     }
 }
 
